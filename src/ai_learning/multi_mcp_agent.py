@@ -1,14 +1,14 @@
 import asyncio
-import os
 import json
-import sys
 
-from openai import OpenAI
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from dataclasses import dataclass
 from contextlib import AsyncExitStack
 from contextlib import AsyncExitStack, asynccontextmanager
+
+from ai_learning.providers.groq import GroqProvider
+from ai_learning.providers.gemini import GeminiProvider
 
 MCP_SERVERS = {
     "weather": "http://127.0.0.1:8000/mcp",
@@ -223,9 +223,9 @@ class MCPConnection:
         )
 
 class ModelClient:
-    def __init__(self, client, model):
-        self.client = client
-        self.model = model
+
+    def __init__(self, provider):
+        self.provider = provider
 
     def complete(self, messages, tools):
         return self.provider.chat(
@@ -293,14 +293,7 @@ class AgentRuntime:
         )
     
 async def main():
-    llm = OpenAI(
-        api_key=os.environ["GROQ_API_KEY"],
-        base_url="https://api.groq.com/openai/v1",
-    )
-    # async with stdio_client(server_params) as (read_stream, write_stream):
-    #     async with ClientSession(read_stream, write_stream) as session:
-
-
+    
     async with connect_mcp_servers(MCP_SERVERS) as connections:
 
         tool_registry = {}
@@ -326,13 +319,17 @@ async def main():
                 f"{route.connection.name.upper()}:{route.tool_name}"
             )
 
-        state = AgentState()
+        # provider = GroqProvider(
+        #     model="openai/gpt-oss-20b",
+        # )
 
-        model_client = ModelClient(
-            client=llm,
-            model="openai/gpt-oss-20b",
+        provider = GeminiProvider(
+            model="gemini-3.7-flash",
         )
 
+        model_client = ModelClient(
+            provider=provider,
+        )
 
         runtime = AgentRuntime(
             model_client=model_client,
