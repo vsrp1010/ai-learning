@@ -334,13 +334,13 @@ async def main():
         )
 
         await runtime.run(
-            "Check whether the checkout-abc123 pod is healthy."
+            "Diagnose pod checkout-abc123 and summarize the result."
         )
 
-        await runtime.run(
-            "Now tell me whether the weather in San Francisco "
-            "is suitable for going outside."
-        )
+        # await runtime.run(
+        #     "Now tell me whether the weather in San Francisco "
+        #     "is suitable for going outside."
+        # )
 
 if __name__ == "__main__":
     asyncio.run(main())
