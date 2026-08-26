@@ -26,6 +26,8 @@ def mcp_tool_to_openai_tool(tool, server_name):
 class AgentState:
     def __init__(self):
         self.messages = []
+        self.executed_tools = []
+        self.iterations = 0
 
     def add_user_message(self, content):
         self.messages.append(
@@ -69,6 +71,7 @@ async def run_agent(
 ):
     state.add_user_message(user_message)
     for iteration in range(max_iterations):
+        state.iterations = iteration + 1
         print(f"\n--- AGENT ITERATION {iteration + 1} ---")
 
         response = model_client.complete(
@@ -91,6 +94,8 @@ async def run_agent(
         for tool_call in assistant_message.tool_calls:
             function_name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments)
+
+            state.executed_tools.append(function_name)
 
             print("\nLLM REQUESTED TOOL:")
             print(function_name, arguments)
@@ -142,15 +147,6 @@ async def run_agent(
                 tool_content = {
                     "error": "Tool execution timed out",
                     "timeout_seconds": 10,
-                }
-
-            except Exception as exc:
-                print("\nTOOL EXECUTION ERROR:")
-                print(exc)
-
-                tool_content = {
-                    "error": "Tool execution failed",
-                    "details": str(exc),
                 }
 
             except Exception as exc:
