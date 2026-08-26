@@ -4,11 +4,9 @@ import json
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from dataclasses import dataclass
-from contextlib import AsyncExitStack
 from contextlib import AsyncExitStack, asynccontextmanager
 
-from ai_learning.providers.groq import GroqProvider
-from ai_learning.providers.gemini import GeminiProvider
+from ai_learning.providers.factory import create_provider
 
 MCP_SERVERS = {
     "weather": "http://127.0.0.1:8000/mcp",
@@ -323,9 +321,7 @@ async def main():
         #     model="openai/gpt-oss-20b",
         # )
 
-        provider = GeminiProvider(
-            model="gemini-3.7-flash",
-        )
+        provider = create_provider()
 
         model_client = ModelClient(
             provider=provider,
