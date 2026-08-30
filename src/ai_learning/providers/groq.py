@@ -1,4 +1,3 @@
-import os
 from typing import Any
 
 from openai import OpenAI
@@ -8,9 +7,14 @@ from .base import LLMProvider
 
 class GroqProvider(LLMProvider):
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, api_key: str | None):
+        if not api_key:
+            raise ValueError(
+                "GROQ_API_KEY is required when using the Groq provider"
+            )
+
         self.client = OpenAI(
-            api_key=os.environ["GROQ_API_KEY"],
+            api_key=api_key,
             base_url="https://api.groq.com/openai/v1",
         )
         self.model = model

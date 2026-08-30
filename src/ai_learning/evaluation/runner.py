@@ -15,10 +15,12 @@ from ai_learning.evaluation.cases import EVALUATION_CASES
 
 def normalize_text(text):
     text = unicodedata.normalize("NFKC", text)
-    text = text.replace("\u2011", "-")
-    text = text.replace("\u2013", "-")
-    text = text.replace("\u2014", "-")
+
+    for char in "\u2010\u2011\u2012\u2013\u2014\u2212":
+        text = text.replace(char, "-")
+
     text = " ".join(text.split())
+
     return text.lower()
 
 def check_expected_facts(answer, expected_facts):
@@ -47,11 +49,15 @@ async def run_evaluations():
                 llm_tools,
             )
 
-        provider = create_provider()
-
-        model_client = ModelClient(
-            provider=provider,
-        )
+        try:
+            provider = create_provider()
+            model_client = ModelClient(
+                provider=provider,
+            )
+        except Exception as exc:
+            print("\nEVALUATION SETUP ERROR:")
+            print(f"{type(exc).__name__}: {exc}")
+            return
 
         results = []
 

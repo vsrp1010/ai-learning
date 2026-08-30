@@ -13,12 +13,14 @@ source = { editable = "." }
 dependencies = [
     { name = "mcp", extra = ["cli"] },
     { name = "openai" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=2.0.0" },
     { name = "openai", specifier = ">=3.3.1" },
+    { name = "python-dotenv", specifier = ">=1.2.3" },
 ]
 
 [[package]]

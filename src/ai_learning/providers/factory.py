@@ -1,4 +1,4 @@
-import os
+from ai_learning.config import load_settings
 
 from .base import LLMProvider
 from .gemini import GeminiProvider
@@ -7,23 +7,25 @@ from .local import LocalProvider
 
 
 def create_provider() -> LLMProvider:
-    provider_name = os.environ.get("LLM_PROVIDER", "groq").lower()
-    model = os.environ.get("LLM_MODEL")
+    settings = load_settings()
 
-    if not model:
-        raise ValueError(
-            "LLM_MODEL environment variable is required"
+    if settings.llm_provider == "groq":
+        return GroqProvider(
+            model=settings.llm_model,
+            api_key=settings.groq_api_key,
         )
 
-    if provider_name == "groq":
-        return GroqProvider(model=model)
+    if settings.llm_provider == "gemini":
+        return GeminiProvider(
+            model=settings.llm_model,
+            api_key=settings.gemini_api_key,
+        )
 
-    if provider_name == "gemini":
-        return GeminiProvider(model=model)
-
-    if provider_name == "local":
-        return LocalProvider(model=model)
+    if settings.llm_provider == "local":
+        return LocalProvider(
+            model=settings.llm_model,
+        )
 
     raise ValueError(
-        f"Unsupported LLM_PROVIDER: {provider_name}"
+        f"Unsupported LLM_PROVIDER: {settings.llm_provider}"
     )
