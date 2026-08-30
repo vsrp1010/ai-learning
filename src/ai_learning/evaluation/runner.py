@@ -1,5 +1,6 @@
 import asyncio
 import time
+import unicodedata
 
 from ai_learning.multi_mcp_agent import (
     AgentRuntime,
@@ -12,16 +13,24 @@ from ai_learning.providers.factory import create_provider
 
 from ai_learning.evaluation.cases import EVALUATION_CASES
 
+def normalize_text(text):
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("\u2011", "-")
+    text = text.replace("\u2013", "-")
+    text = text.replace("\u2014", "-")
+    text = " ".join(text.split())
+    return text.lower()
+
 def check_expected_facts(answer, expected_facts):
     if not answer:
         return False, expected_facts
 
-    answer_lower = answer.lower()
+    answer_normalized = normalize_text(answer)
 
     missing_facts = [
         fact
         for fact in expected_facts
-        if fact.lower() not in answer_lower
+        if normalize_text(fact) not in answer_normalized
     ]
 
     return len(missing_facts) == 0, missing_facts
@@ -66,9 +75,8 @@ async def run_evaluations():
                 executed_tools = runtime.state.executed_tools
                 iterations = runtime.state.iterations
 
-                tool_selection_passed = all(
-                    tool in executed_tools
-                    for tool in case.expected_tools
+                tool_selection_passed = (
+                    set(executed_tools) == set(case.expected_tools)
                 )
 
                 answer_passed, missing_facts = check_expected_facts(
@@ -120,6 +128,9 @@ async def run_evaluations():
                         "executed_tools": runtime.state.executed_tools,
                         "iterations": runtime.state.iterations,
                         "passed": False,
+                        "tool_selection_passed": False,
+                        "answer_passed": False,
+                        "missing_facts": [],
                         "status": "ERROR",
                         "answer": None,
                         "error": str(exc),

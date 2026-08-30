@@ -68,4 +68,26 @@ EVALUATION_CASES = [
             "worker-01",
         ],
     ),
+
+    EvaluationCase(
+        name="no_tool_needed",
+        prompt="What is 2 + 2?",
+        expected_tools=[],
+        expected_facts=[
+            "4",
+        ],
+    ),
+
+    EvaluationCase(
+        name="pod_status_only",
+        prompt="Is pod checkout-abc123 running and ready?",
+        expected_tools=[
+            "kubernetes.get_pod_status",
+        ],
+        expected_facts=[
+            "checkout-abc123",
+            "Running",
+            "ready",
+        ],
+    ),
 ]
