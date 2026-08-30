@@ -106,10 +106,11 @@ async def run_agent(
         state.messages.append(assistant_message)
 
         if not assistant_message.tool_calls:
-            print("\nFINAL ANSWER:")
-            print(assistant_message.content)
-
-            return assistant_message.content
+            return {
+                "answer": assistant_message.content,
+                "iterations": state.iterations,
+                "tools_used": state.executed_tools,
+            }
 
         for tool_call in assistant_message.tool_calls:
             function_name = tool_call.function.name
@@ -213,7 +214,12 @@ async def run_agent(
     print("\nAGENT STOPPED:")
     print(f"Reached maximum of {max_iterations} iterations.")
 
-    return None
+    return {
+        "answer": None,
+        "iterations": state.iterations,
+        "tools_used": state.executed_tools,
+        "error": "Maximum agent iterations reached",
+    }
 
 
 @dataclass
@@ -329,9 +335,11 @@ class AgentRuntime:
         self.tool_max_retries = tool_max_retries
 
     async def run(self, user_message):
+        state = AgentState()
+
         return await run_agent(
             model_client=self.model_client,
-            state=self.state,
+            state=state,
             llm_tools=self.llm_tools,
             tool_registry=self.tool_registry,
             user_message=user_message,
@@ -339,6 +347,7 @@ class AgentRuntime:
             tool_timeout=self.tool_timeout,
             tool_max_retries=self.tool_max_retries,
         )
+
 
 async def main():
     settings = load_settings()
@@ -384,16 +393,22 @@ async def main():
                 tool_max_retries=settings.tool_max_retries,
             )
 
-            await runtime.run(
+            result = await runtime.run(
                 # "Diagnose pod checkout-abc123 and summarize the result."
                 #"Check the current weather in San Jose. Then check the status of the Kubernetes pod named \"my-app-pod\" and diagnose it if it is unhealthy. Give me a concise operational summary, including the weather, pod health, and any recommended action."
                 # "Investigate the payments deployment. Identify any unhealthy pods, diagnose the problem, and give me a concise summary of the likely issue and recommended next steps. Do not restart anything unless I explicitly ask you to."
                 "Investigate the payments deployment. Identify any unhealthy pods, diagnose the problem, and use the pod logs to determine the likely root cause. Give me a concise summary of the evidence and recommended next steps. Do not restart anything unless I explicitly ask you to."
             )
 
+            print("\nRESULT:")
+            print(result)
+
+            print("\nFINAL ANSWER:")
+            print(result["answer"])
+
     except Exception as exc:
-        logger.error("Agent startup failed: %s", exc)
-        print(f"\nAGENT STARTUP FAILED: {exc}")
+        logger.exception("Agent execution failed")
+        print(f"\nAGENT EXECUTION FAILED: {exc}")
 
 if __name__ == "__main__":
     asyncio.run(main())
