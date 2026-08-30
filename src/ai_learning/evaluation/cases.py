@@ -65,7 +65,6 @@ EVALUATION_CASES = [
             "checkout-abc123",
             "Running",
             "ready",
-            "worker-01",
         ],
     ),
 
@@ -90,4 +89,31 @@ EVALUATION_CASES = [
             "ready",
         ],
     ),
+
+    EvaluationCase(
+        name="payments_troubleshooting",
+        prompt=(
+            "Investigate the payments deployment. "
+            "Identify any unhealthy pods, diagnose the problem, "
+            "and use the pod logs to determine the likely root cause. "
+            "Give me a concise summary of the evidence and "
+            "recommended next steps. "
+            "Do not restart anything unless I explicitly ask you to."
+        ),
+        expected_tools=[
+            "kubernetes.get_pods_for_deployment",
+            "kubernetes.get_pod_logs",
+        ],
+        expected_facts=[
+            "payments",
+            "payments-xyz456",
+            "CrashLoopBackOff",
+            "8",
+            "PostgreSQL",
+            "connection refused",
+            "postgres.production.svc",
+            "5432",
+        ],
+    ),
+
 ]

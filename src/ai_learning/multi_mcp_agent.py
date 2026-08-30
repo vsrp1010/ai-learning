@@ -385,7 +385,10 @@ async def main():
             )
 
             await runtime.run(
-                "Diagnose pod checkout-abc123 and summarize the result."
+                # "Diagnose pod checkout-abc123 and summarize the result."
+                #"Check the current weather in San Jose. Then check the status of the Kubernetes pod named \"my-app-pod\" and diagnose it if it is unhealthy. Give me a concise operational summary, including the weather, pod health, and any recommended action."
+                # "Investigate the payments deployment. Identify any unhealthy pods, diagnose the problem, and give me a concise summary of the likely issue and recommended next steps. Do not restart anything unless I explicitly ask you to."
+                "Investigate the payments deployment. Identify any unhealthy pods, diagnose the problem, and use the pod logs to determine the likely root cause. Give me a concise summary of the evidence and recommended next steps. Do not restart anything unless I explicitly ask you to."
             )
 
     except Exception as exc:

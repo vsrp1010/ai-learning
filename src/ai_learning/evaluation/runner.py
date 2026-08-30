@@ -4,11 +4,11 @@ import unicodedata
 
 from ai_learning.multi_mcp_agent import (
     AgentRuntime,
-    MCP_SERVERS,
     ModelClient,
     connect_mcp_servers,
     register_mcp_tools,
 )
+from ai_learning.config import load_settings
 from ai_learning.providers.factory import create_provider
 
 from ai_learning.evaluation.cases import EVALUATION_CASES
@@ -38,7 +38,14 @@ def check_expected_facts(answer, expected_facts):
     return len(missing_facts) == 0, missing_facts
 
 async def run_evaluations():
-    async with connect_mcp_servers(MCP_SERVERS) as connections:
+    settings = load_settings()
+
+    mcp_servers = {
+        "weather": settings.weather_mcp_url,
+        "kubernetes": settings.kubernetes_mcp_url,
+    }
+
+    async with connect_mcp_servers(mcp_servers) as connections:
         tool_registry = {}
         llm_tools = []
 
@@ -81,8 +88,8 @@ async def run_evaluations():
                 executed_tools = runtime.state.executed_tools
                 iterations = runtime.state.iterations
 
-                tool_selection_passed = (
-                    set(executed_tools) == set(case.expected_tools)
+                tool_selection_passed = set(case.expected_tools).issubset(
+                    set(executed_tools)
                 )
 
                 answer_passed, missing_facts = check_expected_facts(

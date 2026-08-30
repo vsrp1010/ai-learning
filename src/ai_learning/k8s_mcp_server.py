@@ -1,10 +1,13 @@
 from pydantic import BaseModel
+
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
+
 import asyncio
 
 
 mcp = MCPServer("Kubernetes Simulator")
+
 
 class PodStatus(BaseModel):
     name: str
@@ -15,17 +18,33 @@ class PodStatus(BaseModel):
     restart_count: int
     node: str
 
+
 class DeploymentRestartResult(BaseModel):
     deployment: str
     namespace: str
     status: str
     restarted_pods: list[str]
 
+
 class PodDiagnosis(BaseModel):
     pod_name: str
     healthy: bool
     diagnosis: str
     recommendations: list[str]
+
+
+class DeploymentPods(BaseModel):
+    deployment: str
+    namespace: str
+    pods: list[str]
+
+
+class PodLogs(BaseModel):
+    pod_name: str
+    container: str
+    logs: str
+    error: bool
+
 
 @mcp.tool(
     description="Get the current status of a Kubernetes pod.",
@@ -48,6 +67,74 @@ def get_pod_status(pod_name: str) -> PodStatus:
         **pod,
     )
 
+
+@mcp.tool(
+    description="List the pods belonging to a Kubernetes deployment.",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+    structured_output=True,
+)
+def get_pods_for_deployment(
+    deployment_name: str,
+) -> DeploymentPods:
+    deployment = deployments.get(deployment_name)
+
+    if deployment is None:
+        raise ValueError(
+            f"Deployment '{deployment_name}' not found"
+        )
+
+    pod_names = [
+        pod_name
+        for pod_name, pod in pods.items()
+        if pod["deployment"] == deployment_name
+    ]
+
+    return DeploymentPods(
+        deployment=deployment_name,
+        namespace=deployment["namespace"],
+        pods=pod_names,
+    )
+
+
+@mcp.tool(
+    description="Get the recent logs from a Kubernetes pod.",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+    structured_output=True,
+)
+def get_pod_logs(pod_name: str) -> PodLogs:
+    pod = pods.get(pod_name)
+
+    if pod is None:
+        raise ValueError(f"Pod '{pod_name}' not found")
+
+    pod_log = logs.get(pod_name)
+
+    if pod_log is None:
+        return PodLogs(
+            pod_name=pod_name,
+            container=pod["deployment"],
+            logs="No logs available.",
+            error=False,
+        )
+
+    return PodLogs(
+        pod_name=pod_name,
+        container=pod["deployment"],
+        logs=pod_log["logs"],
+        error=pod_log["error"],
+    )
+
+
 @mcp.tool(
     description="Restart all pods belonging to a Kubernetes deployment.",
     annotations=ToolAnnotations(
@@ -58,11 +145,15 @@ def get_pod_status(pod_name: str) -> PodStatus:
     ),
     structured_output=True,
 )
-def restart_deployment(deployment_name: str) -> DeploymentRestartResult:
+def restart_deployment(
+    deployment_name: str,
+) -> DeploymentRestartResult:
     deployment = deployments.get(deployment_name)
 
     if deployment is None:
-        raise ValueError(f"Deployment '{deployment_name}' not found")
+        raise ValueError(
+            f"Deployment '{deployment_name}' not found"
+        )
 
     restarted_pods = []
 
@@ -81,6 +172,7 @@ def restart_deployment(deployment_name: str) -> DeploymentRestartResult:
         status="restarted",
         restarted_pods=restarted_pods,
     )
+
 
 @mcp.tool(
     description="Diagnose the health of a Kubernetes pod and provide recommendations.",
@@ -110,20 +202,31 @@ def diagnose_pod(pod_name: str) -> PodDiagnosis:
 
     if pod["phase"] == "CrashLoopBackOff":
         recommendations.append("Inspect the container logs.")
-        recommendations.append("Check the container configuration and dependencies.")
+        recommendations.append(
+            "Check the container configuration and dependencies."
+        )
 
     if pod["restart_count"] > 5:
-        recommendations.append("Investigate the high restart count.")
+        recommendations.append(
+            "Investigate the high restart count."
+        )
 
     if not pod["ready"]:
-        recommendations.append("Check why the pod readiness condition is failing.")
+        recommendations.append(
+            "Check why the pod readiness condition is failing."
+        )
 
     return PodDiagnosis(
         pod_name=pod_name,
         healthy=False,
-        diagnosis=f"Pod is unhealthy: phase={pod['phase']}, ready={pod['ready']}.",
+        diagnosis=(
+            f"Pod is unhealthy: "
+            f"phase={pod['phase']}, "
+            f"ready={pod['ready']}."
+        ),
         recommendations=recommendations,
     )
+
 
 @mcp.resource(
     "k8s://deployments",
@@ -134,6 +237,7 @@ def diagnose_pod(pod_name: str) -> PodDiagnosis:
 def list_deployments() -> dict:
     return deployments
 
+
 @mcp.resource(
     "k8s://cluster-config",
     name="cluster_config",
@@ -142,6 +246,7 @@ def list_deployments() -> dict:
 )
 def cluster_config_resource() -> dict:
     return cluster_config
+
 
 @mcp.prompt(
     name="deployment_manifest",
@@ -156,7 +261,8 @@ def deployment_manifest(
         {
             "role": "user",
             "content": (
-                f"Generate a Kubernetes Deployment manifest for '{application}'.\n"
+                f"Generate a Kubernetes Deployment manifest "
+                f"for '{application}'.\n"
                 f"Use image '{image}' and {replicas} replica(s).\n\n"
                 "Include:\n"
                 "- Deployment metadata\n"
@@ -170,6 +276,7 @@ def deployment_manifest(
             ),
         }
     ]
+
 
 # ---------------------------------------------------------------------------
 # Simulated underlying Kubernetes state
@@ -242,13 +349,54 @@ pods = {
     },
 }
 
-# if __name__ == "__main__":
-#     print("Kubernetes MCP server initialized")
-#     print("Deployments:", deployments)
-#     print("Pods:", pods)
 
-# if __name__ == "__main__":
-#     asyncio.run(mcp.run_stdio_async())
+logs = {
+    "payments-xyz123": {
+        "error": False,
+        "logs": (
+            "Starting payments service...\n"
+            "Configuration loaded successfully.\n"
+            "Connected to PostgreSQL.\n"
+            "Payments service started successfully."
+        ),
+    },
+    "payments-xyz456": {
+        "error": True,
+        "logs": (
+            "Starting payments service...\n"
+            "Loading configuration...\n"
+            "Connecting to PostgreSQL...\n"
+            "ERROR: connection refused: "
+            "postgres.production.svc:5432\n"
+            "Application startup failed."
+        ),
+    },
+    "checkout-abc123": {
+        "error": False,
+        "logs": (
+            "Starting checkout service...\n"
+            "Configuration loaded successfully.\n"
+            "Checkout service started successfully."
+        ),
+    },
+    "checkout-def456": {
+        "error": False,
+        "logs": (
+            "Starting checkout service...\n"
+            "Configuration loaded successfully.\n"
+            "Checkout service started successfully."
+        ),
+    },
+    "checkout-ghi789": {
+        "error": False,
+        "logs": (
+            "Starting checkout service...\n"
+            "Configuration loaded successfully.\n"
+            "Checkout service started successfully."
+        ),
+    },
+}
+
 
 if __name__ == "__main__":
     asyncio.run(
