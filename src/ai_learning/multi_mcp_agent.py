@@ -1,17 +1,25 @@
 import asyncio
 import json
+import logging
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from dataclasses import dataclass
 from contextlib import AsyncExitStack, asynccontextmanager
 
+from ai_learning.config import load_settings
 from ai_learning.providers.factory import create_provider
 
-MCP_SERVERS = {
-    "weather": "http://127.0.0.1:8000/mcp",
-    "kubernetes": "http://127.0.0.1:8001/mcp",
-}
+
+logger = logging.getLogger(__name__)
+
+
+def configure_logging(log_level):
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
+
 
 def mcp_tool_to_openai_tool(tool, server_name):
     return {
@@ -22,6 +30,7 @@ def mcp_tool_to_openai_tool(tool, server_name):
             "parameters": tool.input_schema,
         },
     }
+
 
 class AgentState:
     def __init__(self):
@@ -36,6 +45,7 @@ class AgentState:
                 "content": content,
             }
         )
+
 
 async def call_tool_with_retry(
     route,
@@ -54,10 +64,12 @@ async def call_tool_with_retry(
             if attempt == max_retries:
                 raise
 
-            print(
-                f"\nTOOL RETRY "
-                f"{attempt + 1}/{max_retries}"
+            logger.warning(
+                "Tool retry attempt=%s/%s",
+                attempt + 1,
+                max_retries,
             )
+
 
 async def run_agent(
     model_client,
@@ -70,9 +82,14 @@ async def run_agent(
     tool_max_retries=2,
 ):
     state.add_user_message(user_message)
+
     for iteration in range(max_iterations):
         state.iterations = iteration + 1
-        print(f"\n--- AGENT ITERATION {iteration + 1} ---")
+
+        logger.info(
+            "Agent iteration %s",
+            iteration + 1,
+        )
 
         response = model_client.complete(
             messages=state.messages,
@@ -81,14 +98,17 @@ async def run_agent(
 
         assistant_message = response.choices[0].message
 
-        print("\nLLM RESPONSE:")
-        print(assistant_message)
+        logger.debug(
+            "LLM response: %s",
+            assistant_message,
+        )
 
         state.messages.append(assistant_message)
 
         if not assistant_message.tool_calls:
             print("\nFINAL ANSWER:")
             print(assistant_message.content)
+
             return assistant_message.content
 
         for tool_call in assistant_message.tool_calls:
@@ -97,16 +117,20 @@ async def run_agent(
 
             state.executed_tools.append(function_name)
 
-            print("\nLLM REQUESTED TOOL:")
-            print(function_name, arguments)
+            logger.info(
+                "LLM requested tool=%s",
+                function_name,
+            )
 
             route = tool_registry.get(function_name)
 
             if route is None:
                 error_message = f"Unknown tool: {function_name}"
 
-                print("\nTOOL ERROR:")
-                print(error_message)
+                logger.error(
+                    "Unknown tool requested: %s",
+                    function_name,
+                )
 
                 state.messages.append(
                     {
@@ -129,29 +153,44 @@ async def run_agent(
                     max_retries=tool_max_retries,
                     timeout=tool_timeout,
                 )
-                
-                print("\nMCP RESULT:")
-                print(result)
+
+                logger.debug(
+                    "MCP result: %s",
+                    result,
+                )
 
                 if result.is_error:
                     tool_content = {
                         "error": "MCP tool returned an error",
                         "details": result.structured_content,
                     }
+
+                    logger.error(
+                        "MCP tool returned an error: tool=%s",
+                        function_name,
+                    )
+
                 else:
                     tool_content = result.structured_content
 
             except asyncio.TimeoutError:
-                print("\nTOOL TIMEOUT")
+                logger.error(
+                    "Tool execution timed out: tool=%s timeout_seconds=%s",
+                    function_name,
+                    tool_timeout,
+                )
 
                 tool_content = {
                     "error": "Tool execution timed out",
-                    "timeout_seconds": 10,
+                    "timeout_seconds": tool_timeout,
                 }
 
             except Exception as exc:
-                print("\nTOOL EXECUTION ERROR:")
-                print(exc)
+                logger.error(
+                    "Tool execution failed: tool=%s error=%s",
+                    function_name,
+                    exc,
+                )
 
                 tool_content = {
                     "error": "Tool execution failed",
@@ -166,10 +205,16 @@ async def run_agent(
                 }
             )
 
+    logger.warning(
+        "Agent stopped after reaching maximum iterations=%s",
+        max_iterations,
+    )
+
     print("\nAGENT STOPPED:")
     print(f"Reached maximum of {max_iterations} iterations.")
 
     return None
+
 
 @dataclass
 class ToolRoute:
@@ -181,7 +226,8 @@ class ToolRoute:
             self.tool_name,
             arguments,
         )
-    
+
+
 class MCPConnection:
     def __init__(self, name, url):
         self.name = name
@@ -193,8 +239,10 @@ class MCPConnection:
     async def __aenter__(self):
         await self._exit_stack.__aenter__()
 
-        read_stream, write_stream = await self._exit_stack.enter_async_context(
-            streamable_http_client(self.url)
+        read_stream, write_stream = (
+            await self._exit_stack.enter_async_context(
+                streamable_http_client(self.url)
+            )
         )
 
         self.session = await self._exit_stack.enter_async_context(
@@ -216,8 +264,8 @@ class MCPConnection:
             traceback,
         )
 
-class ModelClient:
 
+class ModelClient:
     def __init__(self, provider):
         self.provider = provider
 
@@ -226,7 +274,8 @@ class ModelClient:
             messages=messages,
             tools=tools,
         )
-    
+
+
 def register_mcp_tools(connection, tool_registry, llm_tools):
     for tool in connection.tools.tools:
         tool_name = f"{connection.name}.{tool.name}"
@@ -249,9 +298,14 @@ async def connect_mcp_servers(server_configs):
         connections = {}
 
         for name, url in server_configs.items():
-            connections[name] = await stack.enter_async_context(
-                MCPConnection(name, url)
-            )
+            try:
+                connections[name] = await stack.enter_async_context(
+                    MCPConnection(name, url)
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Could not connect to MCP server '{name}' at {url}"
+                ) from exc
 
         yield connections
 
@@ -285,58 +339,58 @@ class AgentRuntime:
             tool_timeout=self.tool_timeout,
             tool_max_retries=self.tool_max_retries,
         )
-    
+
 async def main():
-    
-    async with connect_mcp_servers(MCP_SERVERS) as connections:
+    settings = load_settings()
+    configure_logging(settings.log_level)
 
-        tool_registry = {}
-        llm_tools = []
+    mcp_servers = {
+        "weather": settings.weather_mcp_url,
+        "kubernetes": settings.kubernetes_mcp_url,
+    }
 
-        for connection in connections.values():
-            register_mcp_tools(
-                connection,
-                tool_registry,
-                llm_tools,
+    try:
+        async with connect_mcp_servers(mcp_servers) as connections:
+            tool_registry = {}
+            llm_tools = []
+
+            for connection in connections.values():
+                register_mcp_tools(
+                    connection,
+                    tool_registry,
+                    llm_tools,
+                )
+
+            print("\nUNIFIED TOOLS FOR LLM:")
+            for tool in llm_tools:
+                print(f"- {tool['function']['name']}")
+
+            print("\nTOOL ROUTING:")
+            for tool_name, route in tool_registry.items():
+                print(
+                    f"- {tool_name} → "
+                    f"{route.connection.name.upper()}:{route.tool_name}"
+                )
+
+            provider = create_provider()
+            model_client = ModelClient(provider=provider)
+
+            runtime = AgentRuntime(
+                model_client=model_client,
+                llm_tools=llm_tools,
+                tool_registry=tool_registry,
+                max_iterations=settings.agent_max_iterations,
+                tool_timeout=settings.tool_timeout,
+                tool_max_retries=settings.tool_max_retries,
             )
-            
-        print("\nUNIFIED TOOLS FOR LLM:")
 
-        for tool in llm_tools:
-            print(f"- {tool['function']['name']}")
-
-        print("\nTOOL ROUTING:")
-
-        for tool_name, route in tool_registry.items():
-            print(
-                f"- {tool_name} → "
-                f"{route.connection.name.upper()}:{route.tool_name}"
+            await runtime.run(
+                "Diagnose pod checkout-abc123 and summarize the result."
             )
 
-        # provider = GroqProvider(
-        #     model="openai/gpt-oss-20b",
-        # )
-
-        provider = create_provider()
-
-        model_client = ModelClient(
-            provider=provider,
-        )
-
-        runtime = AgentRuntime(
-            model_client=model_client,
-            llm_tools=llm_tools,
-            tool_registry=tool_registry,
-        )
-
-        await runtime.run(
-            "Diagnose pod checkout-abc123 and summarize the result."
-        )
-
-        # await runtime.run(
-        #     "Now tell me whether the weather in San Francisco "
-        #     "is suitable for going outside."
-        # )
+    except Exception as exc:
+        logger.error("Agent startup failed: %s", exc)
+        print(f"\nAGENT STARTUP FAILED: {exc}")
 
 if __name__ == "__main__":
     asyncio.run(main())
