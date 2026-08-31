@@ -2,10 +2,11 @@ import asyncio
 import json
 import logging
 
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
+
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from dataclasses import dataclass
-from contextlib import AsyncExitStack, asynccontextmanager
 
 from ai_learning.config import load_settings
 from ai_learning.providers.factory import create_provider
@@ -36,6 +37,7 @@ class AgentState:
     def __init__(self):
         self.messages = []
         self.executed_tools = []
+        self.blocked_tools = []
         self.iterations = 0
 
     def add_user_message(self, content):
@@ -59,7 +61,6 @@ async def call_tool_with_retry(
                 route.call(arguments),
                 timeout=timeout,
             )
-
         except Exception:
             if attempt == max_retries:
                 raise
@@ -80,6 +81,7 @@ async def run_agent(
     max_iterations=10,
     tool_timeout=10,
     tool_max_retries=2,
+    approval_granted=False,
 ):
     state.add_user_message(user_message)
 
@@ -110,13 +112,13 @@ async def run_agent(
                 "answer": assistant_message.content,
                 "iterations": state.iterations,
                 "tools_used": state.executed_tools,
+                "blocked_tools": state.blocked_tools,
+                "error": None,
             }
 
         for tool_call in assistant_message.tool_calls:
             function_name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments)
-
-            state.executed_tools.append(function_name)
 
             logger.info(
                 "LLM requested tool=%s",
@@ -147,6 +149,37 @@ async def run_agent(
 
                 continue
 
+            # Safety boundary:
+            # destructive tools must be explicitly approved before
+            # the MCP call is allowed to happen.
+            if route.destructive and not approval_granted:
+                logger.warning(
+                    "Blocked destructive tool=%s: approval required",
+                    function_name,
+                )
+
+                state.blocked_tools.append(function_name)
+
+                tool_content = {
+                    "error": "Tool execution blocked",
+                    "reason": "Explicit user approval is required",
+                    "tool": function_name,
+                }
+
+                state.messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(tool_content),
+                    }
+                )
+
+                continue
+
+            # Only record a tool as executed after it has passed
+            # the safety gate and immediately before the MCP call.
+            state.executed_tools.append(function_name)
+
             try:
                 result = await call_tool_with_retry(
                     route,
@@ -170,7 +203,6 @@ async def run_agent(
                         "MCP tool returned an error: tool=%s",
                         function_name,
                     )
-
                 else:
                     tool_content = result.structured_content
 
@@ -218,6 +250,7 @@ async def run_agent(
         "answer": None,
         "iterations": state.iterations,
         "tools_used": state.executed_tools,
+        "blocked_tools": state.blocked_tools,
         "error": "Maximum agent iterations reached",
     }
 
@@ -226,6 +259,8 @@ async def run_agent(
 class ToolRoute:
     connection: "MCPConnection"
     tool_name: str
+    read_only: bool = True
+    destructive: bool = False
 
     async def call(self, arguments):
         return await self.connection.session.call_tool(
@@ -259,6 +294,7 @@ class MCPConnection:
         )
 
         await self.session.initialize()
+
         self.tools = await self.session.list_tools()
 
         return self
@@ -286,9 +322,27 @@ def register_mcp_tools(connection, tool_registry, llm_tools):
     for tool in connection.tools.tools:
         tool_name = f"{connection.name}.{tool.name}"
 
+        annotations = tool.annotations
+
+        read_only = (
+            annotations.read_only_hint
+            if annotations is not None
+            and annotations.read_only_hint is not None
+            else True
+        )
+
+        destructive = (
+            annotations.destructive_hint
+            if annotations is not None
+            and annotations.destructive_hint is not None
+            else False
+        )
+
         tool_registry[tool_name] = ToolRoute(
             connection=connection,
             tool_name=tool.name,
+            read_only=read_only,
+            destructive=destructive,
         )
 
         llm_tools.append(
@@ -297,6 +351,7 @@ def register_mcp_tools(connection, tool_registry, llm_tools):
                 connection.name,
             )
         )
+
 
 @asynccontextmanager
 async def connect_mcp_servers(server_configs):
@@ -315,6 +370,7 @@ async def connect_mcp_servers(server_configs):
 
         yield connections
 
+
 class AgentRuntime:
     def __init__(
         self,
@@ -324,15 +380,16 @@ class AgentRuntime:
         max_iterations=10,
         tool_timeout=10,
         tool_max_retries=2,
+        approval_granted=False,
     ):
         self.model_client = model_client
         self.llm_tools = llm_tools
         self.tool_registry = tool_registry
         self.state = AgentState()
-
         self.max_iterations = max_iterations
         self.tool_timeout = tool_timeout
         self.tool_max_retries = tool_max_retries
+        self.approval_granted = approval_granted
 
     async def run(self, user_message):
         state = AgentState()
@@ -346,11 +403,13 @@ class AgentRuntime:
             max_iterations=self.max_iterations,
             tool_timeout=self.tool_timeout,
             tool_max_retries=self.tool_max_retries,
+            approval_granted=self.approval_granted,
         )
 
 
 async def main():
     settings = load_settings()
+
     configure_logging(settings.log_level)
 
     mcp_servers = {
@@ -371,18 +430,25 @@ async def main():
                 )
 
             print("\nUNIFIED TOOLS FOR LLM:")
+
             for tool in llm_tools:
                 print(f"- {tool['function']['name']}")
 
             print("\nTOOL ROUTING:")
+
             for tool_name, route in tool_registry.items():
                 print(
                     f"- {tool_name} → "
-                    f"{route.connection.name.upper()}:{route.tool_name}"
+                    f"{route.connection.name.upper()}:{route.tool_name} "
+                    f"(read_only={route.read_only}, "
+                    f"destructive={route.destructive})"
                 )
 
             provider = create_provider()
-            model_client = ModelClient(provider=provider)
+
+            model_client = ModelClient(
+                provider=provider,
+            )
 
             runtime = AgentRuntime(
                 model_client=model_client,
@@ -391,13 +457,16 @@ async def main():
                 max_iterations=settings.agent_max_iterations,
                 tool_timeout=settings.tool_timeout,
                 tool_max_retries=settings.tool_max_retries,
+                approval_granted=False,
             )
 
             result = await runtime.run(
-                # "Diagnose pod checkout-abc123 and summarize the result."
-                #"Check the current weather in San Jose. Then check the status of the Kubernetes pod named \"my-app-pod\" and diagnose it if it is unhealthy. Give me a concise operational summary, including the weather, pod health, and any recommended action."
-                # "Investigate the payments deployment. Identify any unhealthy pods, diagnose the problem, and give me a concise summary of the likely issue and recommended next steps. Do not restart anything unless I explicitly ask you to."
-                "Investigate the payments deployment. Identify any unhealthy pods, diagnose the problem, and use the pod logs to determine the likely root cause. Give me a concise summary of the evidence and recommended next steps. Do not restart anything unless I explicitly ask you to."
+                "Investigate the payments deployment. "
+                "Identify any unhealthy pods, diagnose the problem, "
+                "and use the pod logs to determine the likely root cause. "
+                "Give me a concise summary of the evidence and "
+                "recommended next steps. "
+                "Do not restart anything unless I explicitly ask you to."
             )
 
             print("\nRESULT:")
@@ -409,6 +478,7 @@ async def main():
     except Exception as exc:
         logger.exception("Agent execution failed")
         print(f"\nAGENT EXECUTION FAILED: {exc}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
