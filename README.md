@@ -1113,3 +1113,42 @@ uv.lock
 ```
 
 When changing MCP, model-provider, or deployment APIs, verify current official documentation before making changes.
+
+
+---
+# 29. Commands for reference
+1. Start k8s mcp server
+  uv run python src/ai_learning/k8s_mcp_server.py
+
+2. Start weather mcp server
+  uv run python src/ai_learning/weather_server.py
+
+3. Start api server
+  uv run uvicorn ai_learning.api:app --host 127.0.0.1 --port 8080
+
+4. Run multi-mcp-agent
+  uv run python src/ai_learning/multi_mcp_agent.py
+
+5. API calls
+  * curl http://localhost:8080/health
+  * curl http://localhost:8080/ready
+
+  * curl -X POST http://127.0.0.1:8080/chat \
+    -H "Content-Type: application/json" \
+    -d '{
+      "message": "Restart the payments deployment."
+    }'
+
+  * curl -X POST http://127.0.0.1:8080/chat \
+    -H "Content-Type: application/json" \
+    -d '{
+      "message": "Restart the payments deployment.",
+      "approval_granted": true
+    }'
+
+  * curl -X POST http://127.0.0.1:8080/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Investigate the payments deployment. Identify any unhealthy pods, diagnose the problem, and use the pod logs to determine the likely root cause. Do not restart anything unless I explicitly ask you to.",
+    "approval_granted": true
+  }'

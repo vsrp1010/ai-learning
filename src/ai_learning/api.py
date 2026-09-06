@@ -15,7 +15,7 @@ from ai_learning.providers.factory import create_provider
 
 class ChatRequest(BaseModel):
     message: str
-
+    approval_granted: bool = False
 
 class ChatResponse(BaseModel):
     answer: str | None
@@ -41,8 +41,8 @@ async def lifespan(app: FastAPI):
         for server_name, connection in connections.items():
             register_mcp_tools(
                 server_name,
-                connection.url,
-                connection.tools.tools,
+                connection["url"],
+                connection["tools"],
                 tool_registry,
                 llm_tools,
             )
@@ -60,7 +60,6 @@ async def lifespan(app: FastAPI):
             max_iterations=settings.agent_max_iterations,
             tool_timeout=settings.tool_timeout,
             tool_max_retries=settings.tool_max_retries,
-            approval_granted=False,
         )
 
         app.state.runtime = runtime
@@ -98,6 +97,9 @@ async def ready(request: Request):
 async def chat(request: Request, body: ChatRequest):
     runtime: AgentRuntime = request.app.state.runtime
 
-    result = await runtime.run(body.message)
+    result = await runtime.run(
+        body.message,
+        approval_granted=body.approval_granted,
+    )
 
     return ChatResponse(**result)

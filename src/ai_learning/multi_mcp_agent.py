@@ -493,7 +493,6 @@ class AgentRuntime:
         max_iterations=10,
         tool_timeout=10,
         tool_max_retries=2,
-        approval_granted=False,
     ):
         self.model_client = model_client
         self.llm_tools = llm_tools
@@ -502,11 +501,9 @@ class AgentRuntime:
         self.max_iterations = max_iterations
         self.tool_timeout = tool_timeout
         self.tool_max_retries = tool_max_retries
-        self.approval_granted = approval_granted
 
-    async def run(self, user_message):
+    async def run(self, user_message, approval_granted=False):
         state = AgentState()
-
         return await run_agent(
             model_client=self.model_client,
             state=state,
@@ -516,7 +513,7 @@ class AgentRuntime:
             max_iterations=self.max_iterations,
             tool_timeout=self.tool_timeout,
             tool_max_retries=self.tool_max_retries,
-            approval_granted=self.approval_granted,
+            approval_granted=approval_granted,
         )
 
 
@@ -577,7 +574,6 @@ async def main():
                 max_iterations=settings.agent_max_iterations,
                 tool_timeout=settings.tool_timeout,
                 tool_max_retries=settings.tool_max_retries,
-                approval_granted=False,
             )
 
             result = await runtime.run(
