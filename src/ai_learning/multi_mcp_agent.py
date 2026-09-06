@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from mcp import ClientSession
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def configure_logging(log_level):
     logging.basicConfig(
-        level=getattr(logging, log_level),
+        level=getattr(log_level and logging, log_level),
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
 
@@ -55,20 +55,30 @@ async def call_tool_with_retry(
     max_retries,
     timeout,
 ):
+    """
+    Execute an MCP tool with timeout/retry handling.
+
+    Each route.call() creates a fresh MCP session. Therefore a retry
+    also gets a fresh connection/session rather than reusing a stale
+    Streamable HTTP session.
+    """
     for attempt in range(max_retries + 1):
         try:
             return await asyncio.wait_for(
                 route.call(arguments),
                 timeout=timeout,
             )
-        except Exception:
+
+        except Exception as exc:
             if attempt == max_retries:
                 raise
 
             logger.warning(
-                "Tool retry attempt=%s/%s",
+                "Tool retry attempt=%s/%s tool=%s error=%s",
                 attempt + 1,
                 max_retries,
+                route.tool_name,
+                exc,
             )
 
 
@@ -118,7 +128,31 @@ async def run_agent(
 
         for tool_call in assistant_message.tool_calls:
             function_name = tool_call.function.name
-            arguments = json.loads(tool_call.function.arguments)
+
+            try:
+                arguments = json.loads(
+                    tool_call.function.arguments
+                )
+            except json.JSONDecodeError as exc:
+                logger.error(
+                    "Invalid tool arguments: tool=%s error=%s",
+                    function_name,
+                    exc,
+                )
+
+                state.messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(
+                            {
+                                "error": "Invalid tool arguments",
+                                "details": str(exc),
+                            }
+                        ),
+                    }
+                )
+                continue
 
             logger.info(
                 "LLM requested tool=%s",
@@ -149,9 +183,12 @@ async def run_agent(
 
                 continue
 
-            # Safety boundary:
-            # destructive tools must be explicitly approved before
+            # ---------------------------------------------------------
+            # SAFETY BOUNDARY
+            #
+            # Destructive tools must be explicitly approved before
             # the MCP call is allowed to happen.
+            # ---------------------------------------------------------
             if route.destructive and not approval_granted:
                 logger.warning(
                     "Blocked destructive tool=%s: approval required",
@@ -176,7 +213,7 @@ async def run_agent(
 
                 continue
 
-            # Only record a tool as executed after it has passed
+            # Only record the tool as executed after it has passed
             # the safety gate and immediately before the MCP call.
             state.executed_tools.append(function_name)
 
@@ -189,7 +226,8 @@ async def run_agent(
                 )
 
                 logger.debug(
-                    "MCP result: %s",
+                    "MCP result: tool=%s result=%s",
+                    function_name,
                     result,
                 )
 
@@ -203,6 +241,7 @@ async def run_agent(
                         "MCP tool returned an error: tool=%s",
                         function_name,
                     )
+
                 else:
                     tool_content = result.structured_content
 
@@ -243,9 +282,6 @@ async def run_agent(
         max_iterations,
     )
 
-    print("\nAGENT STOPPED:")
-    print(f"Reached maximum of {max_iterations} iterations.")
-
     return {
         "answer": None,
         "iterations": state.iterations,
@@ -257,70 +293,116 @@ async def run_agent(
 
 @dataclass
 class ToolRoute:
-    connection: "MCPConnection"
+    """
+    Routing information for an MCP tool.
+
+    We intentionally store the MCP server URL rather than a persistent
+    ClientSession. A fresh MCP session is created for every tool call.
+    """
+
+    server_name: str
+    server_url: str
     tool_name: str
     read_only: bool = True
     destructive: bool = False
 
     async def call(self, arguments):
-        return await self.connection.session.call_tool(
+        """
+        Create a fresh Streamable HTTP MCP session, execute one tool,
+        and close the session in the same asyncio task.
+
+        This avoids stale MCP sessions and AnyIO cancel-scope ownership
+        problems when an MCP server is restarted.
+        """
+        logger.debug(
+            "Opening MCP session: server=%s tool=%s",
+            self.server_name,
             self.tool_name,
-            arguments,
         )
 
+        async with streamable_http_client(
+            self.server_url
+        ) as (read_stream, write_stream):
 
-class MCPConnection:
-    def __init__(self, name, url):
-        self.name = name
-        self.url = url
-        self.session = None
-        self.tools = None
-        self._exit_stack = AsyncExitStack()
-
-    async def __aenter__(self):
-        await self._exit_stack.__aenter__()
-
-        read_stream, write_stream = (
-            await self._exit_stack.enter_async_context(
-                streamable_http_client(self.url)
-            )
-        )
-
-        self.session = await self._exit_stack.enter_async_context(
-            ClientSession(
+            async with ClientSession(
                 read_stream,
                 write_stream,
+            ) as session:
+
+                await session.initialize()
+
+                logger.debug(
+                    "MCP session initialized: server=%s tool=%s",
+                    self.server_name,
+                    self.tool_name,
+                )
+
+                result = await session.call_tool(
+                    self.tool_name,
+                    arguments,
+                )
+
+                logger.debug(
+                    "MCP tool completed: server=%s tool=%s",
+                    self.server_name,
+                    self.tool_name,
+                )
+
+                return result
+
+
+async def discover_mcp_tools(
+    server_name,
+    server_url,
+):
+    """
+    Connect to an MCP server, discover its tools, then close the
+    discovery session.
+
+    Tool discovery happens during application startup. Actual tool
+    execution uses a fresh session through ToolRoute.call().
+    """
+    logger.info(
+        "Discovering MCP tools: server=%s url=%s",
+        server_name,
+        server_url,
+    )
+
+    async with streamable_http_client(
+        server_url
+    ) as (read_stream, write_stream):
+
+        async with ClientSession(
+            read_stream,
+            write_stream,
+        ) as session:
+
+            await session.initialize()
+
+            tools = await session.list_tools()
+
+            logger.info(
+                "Discovered MCP tools: server=%s count=%s",
+                server_name,
+                len(tools.tools),
             )
-        )
 
-        await self.session.initialize()
-
-        self.tools = await self.session.list_tools()
-
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        return await self._exit_stack.__aexit__(
-            exc_type,
-            exc_value,
-            traceback,
-        )
+            return tools
 
 
-class ModelClient:
-    def __init__(self, provider):
-        self.provider = provider
+def register_mcp_tools(
+    server_name,
+    server_url,
+    tools,
+    tool_registry,
+    llm_tools,
+):
+    """
+    Register discovered MCP tools in the unified model-facing registry.
+    """
 
-    def complete(self, messages, tools):
-        return self.provider.chat(
-            messages=messages,
-            tools=tools,
-        )
-
-
-def register_mcp_tools(connection, tool_registry, llm_tools):
-    for tool in connection.tools.tools:
-        tool_name = f"{connection.name}.{tool.name}"
+    for tool in tools.tools:
+        tool_name = f"{server_name}.{tool.name}"
 
         annotations = tool.annotations
 
@@ -339,7 +421,8 @@ def register_mcp_tools(connection, tool_registry, llm_tools):
         )
 
         tool_registry[tool_name] = ToolRoute(
-            connection=connection,
+            server_name=server_name,
+            server_url=server_url,
             tool_name=tool.name,
             read_only=read_only,
             destructive=destructive,
@@ -348,27 +431,57 @@ def register_mcp_tools(connection, tool_registry, llm_tools):
         llm_tools.append(
             mcp_tool_to_openai_tool(
                 tool,
-                connection.name,
+                server_name,
             )
         )
 
 
 @asynccontextmanager
 async def connect_mcp_servers(server_configs):
-    async with AsyncExitStack() as stack:
-        connections = {}
+    """
+    Discover tools from all configured MCP servers.
 
-        for name, url in server_configs.items():
-            try:
-                connections[name] = await stack.enter_async_context(
-                    MCPConnection(name, url)
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Could not connect to MCP server '{name}' at {url}"
-                ) from exc
+    Unlike the previous implementation, this function does NOT keep
+    persistent MCP sessions alive. It only performs startup discovery.
 
+    Tool execution later creates a fresh MCP session per invocation.
+    """
+
+    connections = {}
+
+    for name, url in server_configs.items():
+        try:
+            tools = await discover_mcp_tools(
+                server_name=name,
+                server_url=url,
+            )
+
+            connections[name] = {
+                "url": url,
+                "tools": tools,
+            }
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not connect to MCP server '{name}' at {url}"
+            ) from exc
+
+    try:
         yield connections
+    finally:
+        # There are no persistent MCP sessions to close here.
+        logger.debug("MCP server discovery context closed")
+
+
+class ModelClient:
+    def __init__(self, provider):
+        self.provider = provider
+
+    def complete(self, messages, tools):
+        return self.provider.chat(
+            messages=messages,
+            tools=tools,
+        )
 
 
 class AgentRuntime:
@@ -418,28 +531,35 @@ async def main():
     }
 
     try:
-        async with connect_mcp_servers(mcp_servers) as connections:
+        async with connect_mcp_servers(
+            mcp_servers
+        ) as connections:
+
             tool_registry = {}
             llm_tools = []
 
-            for connection in connections.values():
+            for server_name, connection in connections.items():
                 register_mcp_tools(
-                    connection,
-                    tool_registry,
-                    llm_tools,
+                    server_name=server_name,
+                    server_url=connection["url"],
+                    tools=connection["tools"],
+                    tool_registry=tool_registry,
+                    llm_tools=llm_tools,
                 )
 
             print("\nUNIFIED TOOLS FOR LLM:")
 
             for tool in llm_tools:
-                print(f"- {tool['function']['name']}")
+                print(
+                    f"- {tool['function']['name']}"
+                )
 
             print("\nTOOL ROUTING:")
 
             for tool_name, route in tool_registry.items():
                 print(
                     f"- {tool_name} → "
-                    f"{route.connection.name.upper()}:{route.tool_name} "
+                    f"{route.server_name.upper()}:{route.tool_name} "
                     f"(read_only={route.read_only}, "
                     f"destructive={route.destructive})"
                 )
@@ -468,6 +588,9 @@ async def main():
                 "recommended next steps. "
                 "Do not restart anything unless I explicitly ask you to."
             )
+            # result = await runtime.run(
+            #     "Restart the payments deployment."
+            # )
 
             print("\nRESULT:")
             print(result)
@@ -477,7 +600,10 @@ async def main():
 
     except Exception as exc:
         logger.exception("Agent execution failed")
-        print(f"\nAGENT EXECUTION FAILED: {exc}")
+
+        print(
+            f"\nAGENT EXECUTION FAILED: {exc}"
+        )
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ class ChatResponse(BaseModel):
     answer: str | None
     iterations: int
     tools_used: list[str]
+    blocked_tools: list[str]
     error: str | None = None
 
 
@@ -37,15 +38,20 @@ async def lifespan(app: FastAPI):
         tool_registry = {}
         llm_tools = []
 
-        for connection in connections.values():
+        for server_name, connection in connections.items():
             register_mcp_tools(
-                connection,
+                server_name,
+                connection.url,
+                connection.tools.tools,
                 tool_registry,
                 llm_tools,
             )
 
         provider = create_provider()
-        model_client = ModelClient(provider=provider)
+
+        model_client = ModelClient(
+            provider=provider,
+        )
 
         runtime = AgentRuntime(
             model_client=model_client,
@@ -54,6 +60,7 @@ async def lifespan(app: FastAPI):
             max_iterations=settings.agent_max_iterations,
             tool_timeout=settings.tool_timeout,
             tool_max_retries=settings.tool_max_retries,
+            approval_granted=False,
         )
 
         app.state.runtime = runtime
@@ -70,7 +77,9 @@ app = FastAPI(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+    }
 
 
 @app.get("/ready")

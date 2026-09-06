@@ -9,6 +9,10 @@ import asyncio
 mcp = MCPServer("Kubernetes Simulator")
 
 
+# ---------------------------------------------------------------------------
+# Response models
+# ---------------------------------------------------------------------------
+
 class PodStatus(BaseModel):
     name: str
     namespace: str
@@ -46,13 +50,17 @@ class PodLogs(BaseModel):
     error: bool
 
 
+# ---------------------------------------------------------------------------
+# MCP tools
+# ---------------------------------------------------------------------------
+
 @mcp.tool(
     description="Get the current status of a Kubernetes pod.",
     annotations=ToolAnnotations(
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False,
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
     ),
     structured_output=True,
 )
@@ -71,10 +79,10 @@ def get_pod_status(pod_name: str) -> PodStatus:
 @mcp.tool(
     description="List the pods belonging to a Kubernetes deployment.",
     annotations=ToolAnnotations(
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False,
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
     ),
     structured_output=True,
 )
@@ -104,10 +112,10 @@ def get_pods_for_deployment(
 @mcp.tool(
     description="Get the recent logs from a Kubernetes pod.",
     annotations=ToolAnnotations(
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False,
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
     ),
     structured_output=True,
 )
@@ -138,10 +146,10 @@ def get_pod_logs(pod_name: str) -> PodLogs:
 @mcp.tool(
     description="Restart all pods belonging to a Kubernetes deployment.",
     annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=False,
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=False,
+        open_world_hint=False,
     ),
     structured_output=True,
 )
@@ -177,10 +185,10 @@ def restart_deployment(
 @mcp.tool(
     description="Diagnose the health of a Kubernetes pod and provide recommendations.",
     annotations=ToolAnnotations(
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False,
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
     ),
     structured_output=True,
 )
@@ -200,10 +208,38 @@ def diagnose_pod(pod_name: str) -> PodDiagnosis:
 
     recommendations = []
 
+    # CrashLoopBackOff
     if pod["phase"] == "CrashLoopBackOff":
         recommendations.append("Inspect the container logs.")
         recommendations.append(
             "Check the container configuration and dependencies."
+        )
+
+    # Pending
+    if pod["phase"] == "Pending":
+        recommendations.append(
+            "Check cluster capacity and pod scheduling events."
+        )
+        recommendations.append(
+            "Verify that requested CPU and memory can be scheduled."
+        )
+
+    # ImagePullBackOff
+    if pod["phase"] == "ImagePullBackOff":
+        recommendations.append(
+            "Check that the container image name and tag are correct."
+        )
+        recommendations.append(
+            "Verify that the image registry is reachable and credentials are valid."
+        )
+
+    # Running but not ready
+    if pod["phase"] == "Running" and not pod["ready"]:
+        recommendations.append(
+            "Inspect readiness probe configuration and failures."
+        )
+        recommendations.append(
+            "Check application logs for startup or health-check failures."
         )
 
     if pod["restart_count"] > 5:
@@ -211,22 +247,51 @@ def diagnose_pod(pod_name: str) -> PodDiagnosis:
             "Investigate the high restart count."
         )
 
-    if not pod["ready"]:
+    if not pod["ready"] and pod["phase"] not in {
+        "Pending",
+        "CrashLoopBackOff",
+        "ImagePullBackOff",
+    }:
         recommendations.append(
             "Check why the pod readiness condition is failing."
+        )
+
+    # Scenario-specific diagnosis
+    if pod["phase"] == "Pending":
+        diagnosis = (
+            "Pod is pending because it cannot currently be scheduled. "
+            "The simulated cluster does not have enough available CPU."
+        )
+
+    elif pod["phase"] == "ImagePullBackOff":
+        diagnosis = (
+            "Pod cannot start because Kubernetes cannot pull the configured "
+            "container image."
+        )
+
+    elif pod["phase"] == "Running" and not pod["ready"]:
+        diagnosis = (
+            "Pod is running but not ready because its readiness probe is failing."
+        )
+
+    else:
+        diagnosis = (
+            f"Pod is unhealthy: "
+            f"phase={pod['phase']}, "
+            f"ready={pod['ready']}."
         )
 
     return PodDiagnosis(
         pod_name=pod_name,
         healthy=False,
-        diagnosis=(
-            f"Pod is unhealthy: "
-            f"phase={pod['phase']}, "
-            f"ready={pod['ready']}."
-        ),
+        diagnosis=diagnosis,
         recommendations=recommendations,
     )
 
+
+# ---------------------------------------------------------------------------
+# MCP resources
+# ---------------------------------------------------------------------------
 
 @mcp.resource(
     "k8s://deployments",
@@ -247,6 +312,10 @@ def list_deployments() -> dict:
 def cluster_config_resource() -> dict:
     return cluster_config
 
+
+# ---------------------------------------------------------------------------
+# MCP prompt
+# ---------------------------------------------------------------------------
 
 @mcp.prompt(
     name="deployment_manifest",
@@ -291,22 +360,53 @@ cluster_config = {
 
 
 deployments = {
+    # Healthy baseline deployment
     "checkout": {
         "namespace": "production",
         "desired_replicas": 3,
         "available_replicas": 3,
         "image": "checkout:v1.4.2",
     },
+
+    # Existing database connectivity failure
     "payments": {
         "namespace": "production",
         "desired_replicas": 2,
-        "available_replicas": 2,
+        "available_replicas": 1,
         "image": "payments:v2.1.0",
+    },
+
+    # Scenario 2: insufficient cluster resources
+    "inventory": {
+        "namespace": "production",
+        "desired_replicas": 1,
+        "available_replicas": 0,
+        "image": "inventory:v3.0.1",
+    },
+
+    # Scenario 3: readiness probe failure
+    "catalog": {
+        "namespace": "production",
+        "desired_replicas": 1,
+        "available_replicas": 0,
+        "image": "catalog:v2.4.0",
+    },
+
+    # Scenario 4: image cannot be pulled
+    "shipping": {
+        "namespace": "production",
+        "desired_replicas": 1,
+        "available_replicas": 0,
+        "image": "shipping:v9.9.9",
     },
 }
 
 
 pods = {
+    # -----------------------------------------------------------------------
+    # checkout - healthy
+    # -----------------------------------------------------------------------
+
     "checkout-abc123": {
         "namespace": "production",
         "deployment": "checkout",
@@ -315,6 +415,7 @@ pods = {
         "restart_count": 0,
         "node": "worker-01",
     },
+
     "checkout-def456": {
         "namespace": "production",
         "deployment": "checkout",
@@ -323,6 +424,7 @@ pods = {
         "restart_count": 1,
         "node": "worker-02",
     },
+
     "checkout-ghi789": {
         "namespace": "production",
         "deployment": "checkout",
@@ -331,6 +433,11 @@ pods = {
         "restart_count": 0,
         "node": "worker-03",
     },
+
+    # -----------------------------------------------------------------------
+    # payments - CrashLoopBackOff / PostgreSQL connection failure
+    # -----------------------------------------------------------------------
+
     "payments-xyz123": {
         "namespace": "production",
         "deployment": "payments",
@@ -339,6 +446,7 @@ pods = {
         "restart_count": 0,
         "node": "worker-01",
     },
+
     "payments-xyz456": {
         "namespace": "production",
         "deployment": "payments",
@@ -347,10 +455,84 @@ pods = {
         "restart_count": 8,
         "node": "worker-02",
     },
+
+    # -----------------------------------------------------------------------
+    # inventory - Pending / insufficient CPU
+    # -----------------------------------------------------------------------
+
+    "inventory-abc123": {
+        "namespace": "production",
+        "deployment": "inventory",
+        "phase": "Pending",
+        "ready": False,
+        "restart_count": 0,
+        "node": "unscheduled",
+    },
+
+    # -----------------------------------------------------------------------
+    # catalog - Running but readiness probe failing
+    # -----------------------------------------------------------------------
+
+    "catalog-abc123": {
+        "namespace": "production",
+        "deployment": "catalog",
+        "phase": "Running",
+        "ready": False,
+        "restart_count": 0,
+        "node": "worker-03",
+    },
+
+    # -----------------------------------------------------------------------
+    # shipping - ImagePullBackOff
+    # -----------------------------------------------------------------------
+
+    "shipping-abc123": {
+        "namespace": "production",
+        "deployment": "shipping",
+        "phase": "ImagePullBackOff",
+        "ready": False,
+        "restart_count": 0,
+        "node": "worker-02",
+    },
 }
 
 
 logs = {
+    # -----------------------------------------------------------------------
+    # checkout
+    # -----------------------------------------------------------------------
+
+    "checkout-abc123": {
+        "error": False,
+        "logs": (
+            "Starting checkout service...\n"
+            "Configuration loaded successfully.\n"
+            "Checkout service started successfully."
+        ),
+    },
+
+    "checkout-def456": {
+        "error": False,
+        "logs": (
+            "Starting checkout service...\n"
+            "Configuration loaded successfully.\n"
+            "Checkout service started successfully."
+        ),
+    },
+
+    "checkout-ghi789": {
+        "error": False,
+        "logs": (
+            "Starting checkout service...\n"
+            "Configuration loaded successfully.\n"
+            "Checkout service started successfully."
+        ),
+    },
+
+    # -----------------------------------------------------------------------
+    # payments
+    # -----------------------------------------------------------------------
+
     "payments-xyz123": {
         "error": False,
         "logs": (
@@ -360,6 +542,7 @@ logs = {
             "Payments service started successfully."
         ),
     },
+
     "payments-xyz456": {
         "error": True,
         "logs": (
@@ -371,32 +554,56 @@ logs = {
             "Application startup failed."
         ),
     },
-    "checkout-abc123": {
+
+    # -----------------------------------------------------------------------
+    # inventory
+    # -----------------------------------------------------------------------
+
+    "inventory-abc123": {
         "error": False,
         "logs": (
-            "Starting checkout service...\n"
-            "Configuration loaded successfully.\n"
-            "Checkout service started successfully."
+            "Pod created successfully.\n"
+            "Waiting for scheduler...\n"
+            "Pod has not been scheduled."
         ),
     },
-    "checkout-def456": {
-        "error": False,
+
+    # -----------------------------------------------------------------------
+    # catalog
+    # -----------------------------------------------------------------------
+
+    "catalog-abc123": {
+        "error": True,
         "logs": (
-            "Starting checkout service...\n"
+            "Starting catalog service...\n"
             "Configuration loaded successfully.\n"
-            "Checkout service started successfully."
+            "Catalog service started.\n"
+            "Readiness probe failed: "
+            "GET http://127.0.0.1:8080/health returned HTTP 503\n"
+            "Application is running but not ready."
         ),
     },
-    "checkout-ghi789": {
-        "error": False,
+
+    # -----------------------------------------------------------------------
+    # shipping
+    # -----------------------------------------------------------------------
+
+    "shipping-abc123": {
+        "error": True,
         "logs": (
-            "Starting checkout service...\n"
-            "Configuration loaded successfully.\n"
-            "Checkout service started successfully."
+            "Pulling image shipping:v9.9.9...\n"
+            "Failed to pull image.\n"
+            "Error response from registry: "
+            "manifest for shipping:v9.9.9 not found.\n"
+            "Back-off pulling image."
         ),
     },
 }
 
+
+# ---------------------------------------------------------------------------
+# Start server
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     asyncio.run(
